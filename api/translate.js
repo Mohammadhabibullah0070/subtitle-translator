@@ -27,14 +27,18 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing texts or apiKey" });
     }
 
-    const response = await fetch("https://api-free.deepl.com/v1/translate", {
+    // Fix 1: Use /v2/translate (not /v1/)
+    // Fix 2: text must be an array of strings, not a joined string
+    const textArray = Array.isArray(texts) ? texts : [texts];
+
+    const response = await fetch("https://api-free.deepl.com/v2/translate", {
       method: "POST",
       headers: {
         Authorization: `DeepL-Auth-Key ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        text: Array.isArray(texts) ? texts.join("\n") : texts,
+        text: textArray,
         source_lang: "EN",
         target_lang: "BN",
       }),

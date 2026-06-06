@@ -21,15 +21,23 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { texts, apiKey } = req.body;
+    const { texts, apiKey, sourceLang } = req.body;
 
     if (!texts || !apiKey) {
       return res.status(400).json({ error: "Missing texts or apiKey" });
     }
 
-    // Fix 1: Use /v2/translate (not /v1/)
-    // Fix 2: text must be an array of strings, not a joined string
     const textArray = Array.isArray(texts) ? texts : [texts];
+
+    const body = {
+      text: textArray,
+      target_lang: "BN",
+    };
+
+    // Only set source_lang if not auto-detect
+    if (sourceLang && sourceLang !== "AUTO") {
+      body.source_lang = sourceLang;
+    }
 
     const response = await fetch("https://api-free.deepl.com/v2/translate", {
       method: "POST",
@@ -37,11 +45,7 @@ export default async function handler(req, res) {
         Authorization: `DeepL-Auth-Key ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        text: textArray,
-        source_lang: "EN",
-        target_lang: "BN",
-      }),
+      body: JSON.stringify(body),
     });
 
     const data = await response.json();

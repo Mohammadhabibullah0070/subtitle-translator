@@ -1,9 +1,44 @@
 import { useState, useRef, useCallback } from "react";
 
-const BATCH_SIZE = 25; // subtitles per API call (reduced for token efficiency)
-const DELAY_BETWEEN_BATCHES = 500; // ms - rate limiting
+const BATCH_SIZE = 25;
+const DELAY_BETWEEN_BATCHES = 500;
 const MAX_RETRIES = 3;
-const API_TIMEOUT = 30000; // 30 seconds
+const API_TIMEOUT = 30000;
+
+// All languages supported by DeepL as source languages
+const SOURCE_LANGUAGES = [
+  { code: "AUTO", label: "Auto-detect", flag: "🌐" },
+  { code: "AR",   label: "Arabic",      flag: "🇸🇦" },
+  { code: "BG",   label: "Bulgarian",   flag: "🇧🇬" },
+  { code: "CS",   label: "Czech",       flag: "🇨🇿" },
+  { code: "DA",   label: "Danish",      flag: "🇩🇰" },
+  { code: "DE",   label: "German",      flag: "🇩🇪" },
+  { code: "EL",   label: "Greek",       flag: "🇬🇷" },
+  { code: "EN",   label: "English",     flag: "🇬🇧" },
+  { code: "ES",   label: "Spanish",     flag: "🇪🇸" },
+  { code: "ET",   label: "Estonian",    flag: "🇪🇪" },
+  { code: "FI",   label: "Finnish",     flag: "🇫🇮" },
+  { code: "FR",   label: "French",      flag: "🇫🇷" },
+  { code: "HU",   label: "Hungarian",   flag: "🇭🇺" },
+  { code: "ID",   label: "Indonesian",  flag: "🇮🇩" },
+  { code: "IT",   label: "Italian",     flag: "🇮🇹" },
+  { code: "JA",   label: "Japanese",    flag: "🇯🇵" },
+  { code: "KO",   label: "Korean",      flag: "🇰🇷" },
+  { code: "LT",   label: "Lithuanian",  flag: "🇱🇹" },
+  { code: "LV",   label: "Latvian",     flag: "🇱🇻" },
+  { code: "NB",   label: "Norwegian",   flag: "🇳🇴" },
+  { code: "NL",   label: "Dutch",       flag: "🇳🇱" },
+  { code: "PL",   label: "Polish",      flag: "🇵🇱" },
+  { code: "PT",   label: "Portuguese",  flag: "🇵🇹" },
+  { code: "RO",   label: "Romanian",    flag: "🇷🇴" },
+  { code: "RU",   label: "Russian",     flag: "🇷🇺" },
+  { code: "SK",   label: "Slovak",      flag: "🇸🇰" },
+  { code: "SL",   label: "Slovenian",   flag: "🇸🇮" },
+  { code: "SV",   label: "Swedish",     flag: "🇸🇪" },
+  { code: "TR",   label: "Turkish",     flag: "🇹🇷" },
+  { code: "UK",   label: "Ukrainian",   flag: "🇺🇦" },
+  { code: "ZH",   label: "Chinese",     flag: "🇨🇳" },
+];
 
 function parseSRT(text) {
   const blocks = text.trim().split(/\n\s*\n/);
@@ -28,7 +63,7 @@ async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function translateBatch(texts, retryCount = 0) {
+async function translateBatch(texts, sourceLang, retryCount = 0) {
   const apiKey = localStorage.getItem("deepl_api_key");
   if (!apiKey) {
     throw new Error("DeepL API key not set. Please configure it in settings.");
@@ -38,7 +73,6 @@ async function translateBatch(texts, retryCount = 0) {
   const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT);
 
   try {
-    // Call backend proxy to translate with DeepL
     const backendUrl =
       process.env.NODE_ENV === "production"
         ? "/api/translate"
@@ -46,13 +80,8 @@ async function translateBatch(texts, retryCount = 0) {
 
     const response = await fetch(backendUrl, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        texts: texts,
-        apiKey: apiKey,
-      }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ texts, apiKey, sourceLang }),
       signal: controller.signal,
     });
 
@@ -62,7 +91,7 @@ async function translateBatch(texts, retryCount = 0) {
       const errorData = await response.json().catch(() => ({}));
       if (response.status === 429 && retryCount < MAX_RETRIES) {
         await sleep((retryCount + 1) * 3000);
-        return translateBatch(texts, retryCount + 1);
+        return translateBatch(texts, sourceLang, retryCount + 1);
       }
       throw new Error(
         `DeepL API Error ${response.status}: ${errorData.error || errorData.message || response.statusText}`,
@@ -76,13 +105,13 @@ async function translateBatch(texts, retryCount = 0) {
     if (err.name === "AbortError") {
       if (retryCount < MAX_RETRIES) {
         await sleep(1000 * (retryCount + 1));
-        return translateBatch(texts, retryCount + 1);
+        return translateBatch(texts, sourceLang, retryCount + 1);
       }
       throw new Error("Request timeout after retries");
     }
     if (retryCount < MAX_RETRIES && !err.message.includes("API key")) {
       await sleep(1000 * (retryCount + 1));
-      return translateBatch(texts, retryCount + 1);
+      return translateBatch(texts, sourceLang, retryCount + 1);
     }
     throw err;
   }
@@ -94,9 +123,10 @@ export default function App() {
   const [translated, setTranslated] = useState([]);
   const [progress, setProgress] = useState(0);
   const [total, setTotal] = useState(0);
-  const [status, setStatus] = useState("idle"); // idle | parsing | translating | done | error
+  const [status, setStatus] = useState("idle");
   const [error, setError] = useState("");
   const [dragOver, setDragOver] = useState(false);
+  const [sourceLang, setSourceLang] = useState("AUTO");
   const [apiKey, setApiKey] = useState(
     () => localStorage.getItem("deepl_api_key") || "",
   );
@@ -104,6 +134,8 @@ export default function App() {
     !localStorage.getItem("deepl_api_key"),
   );
   const fileRef = useRef();
+
+  const selectedLang = SOURCE_LANGUAGES.find((l) => l.code === sourceLang);
 
   const handleApiKeyChange = (key) => {
     setApiKey(key);
@@ -134,8 +166,7 @@ export default function App() {
   const handleDrop = (e) => {
     e.preventDefault();
     setDragOver(false);
-    const f = e.dataTransfer.files[0];
-    handleFile(f);
+    handleFile(e.dataTransfer.files[0]);
   };
 
   const translate = async () => {
@@ -151,17 +182,14 @@ export default function App() {
     const result = [...entries];
 
     try {
-      const totalBatches = Math.ceil(entries.length / BATCH_SIZE);
       for (let i = 0; i < entries.length; i += BATCH_SIZE) {
         const batch = entries.slice(i, i + BATCH_SIZE);
         const texts = batch.map((e) => e.content);
-        const translatedTexts = await translateBatch(texts);
+        const translatedTexts = await translateBatch(texts, sourceLang);
         translatedTexts.forEach((t, j) => {
           result[i + j] = { ...result[i + j], content: t };
         });
         setProgress(Math.min(i + BATCH_SIZE, entries.length));
-
-        // Add delay between batches (except after the last one)
         if (i + BATCH_SIZE < entries.length) {
           await sleep(DELAY_BETWEEN_BATCHES);
         }
@@ -193,6 +221,29 @@ export default function App() {
       ? Math.ceil((total / BATCH_SIZE) * (DELAY_BETWEEN_BATCHES / 1000))
       : 0;
 
+  const selectStyle = {
+    width: "100%",
+    maxWidth: 560,
+    padding: "12px 16px",
+    borderRadius: 10,
+    border: "1px solid rgba(255,255,255,0.1)",
+    background: "rgba(255,255,255,0.04)",
+    color: "#f0ebe3",
+    fontSize: 14,
+    fontFamily: "'Syne', sans-serif",
+    fontWeight: 600,
+    cursor: "pointer",
+    appearance: "none",
+    backgroundImage:
+      "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239a9080' d='M6 8L1 3h10z'/%3E%3C/svg%3E\")",
+    backgroundRepeat: "no-repeat",
+    backgroundPosition: "right 14px center",
+    paddingRight: 36,
+    marginBottom: 12,
+    outline: "none",
+    transition: "border-color 0.2s",
+  };
+
   return (
     <div
       style={{
@@ -208,20 +259,16 @@ export default function App() {
         overflow: "hidden",
       }}
     >
-      {/* Google Fonts */}
       <link
         href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Noto+Sans+Bengali:wght@400;500&display=swap"
         rel="stylesheet"
       />
 
-      {/* Background decoration */}
+      {/* Background */}
       <div
         style={{
           position: "fixed",
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
+          top: 0, left: 0, right: 0, bottom: 0,
           pointerEvents: "none",
           background:
             "radial-gradient(ellipse 60% 50% at 70% 20%, rgba(234,88,12,0.12) 0%, transparent 70%), radial-gradient(ellipse 40% 40% at 20% 80%, rgba(234,88,12,0.07) 0%, transparent 70%)",
@@ -233,10 +280,7 @@ export default function App() {
         <div
           style={{
             position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
+            top: 0, left: 0, right: 0, bottom: 0,
             background: "rgba(0,0,0,0.6)",
             display: "flex",
             alignItems: "center",
@@ -250,29 +294,23 @@ export default function App() {
               borderRadius: 12,
               padding: "32px",
               maxWidth: 400,
+              width: "90%",
               border: "1px solid rgba(234,88,12,0.2)",
               boxShadow: "0 20px 60px rgba(0,0,0,0.8)",
             }}
           >
-            <h2
-              style={{
-                margin: 0,
-                fontSize: 20,
-                marginBottom: 12,
-                fontWeight: 700,
-              }}
-            >
+            <h2 style={{ margin: 0, fontSize: 20, marginBottom: 12, fontWeight: 700 }}>
               Configure DeepL API Key
             </h2>
             <p style={{ color: "#9a9080", fontSize: 13, marginBottom: 16 }}>
-              Enter your free DeepL API key. It will be stored locally in your
-              browser and never sent to external servers.
+              Enter your free DeepL API key. Stored locally in your browser only.
             </p>
             <input
               type="password"
               placeholder="Your-API-Key-Here"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleApiKeyChange(apiKey)}
               style={{
                 width: "100%",
                 padding: "10px 12px",
@@ -298,6 +336,7 @@ export default function App() {
                   fontWeight: 600,
                   padding: "10px 0",
                   cursor: "pointer",
+                  fontFamily: "'Syne', sans-serif",
                 }}
               >
                 Save
@@ -316,19 +355,13 @@ export default function App() {
                   fontWeight: 600,
                   padding: "10px 0",
                   cursor: "pointer",
+                  fontFamily: "'Syne', sans-serif",
                 }}
               >
                 Cancel
               </button>
             </div>
-            <div
-              style={{
-                fontSize: 11,
-                color: "#5a5040",
-                marginTop: 16,
-                textAlign: "center",
-              }}
-            >
+            <div style={{ fontSize: 11, color: "#5a5040", marginTop: 16, textAlign: "center" }}>
               Get your free key at{" "}
               <a
                 href="https://www.deepl.com/pro#developer"
@@ -343,7 +376,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Header with Settings */}
+      {/* Settings Button */}
       <div style={{ position: "fixed", top: 20, right: 20, zIndex: 100 }}>
         <button
           onClick={() => setShowSettings(true)}
@@ -364,9 +397,7 @@ export default function App() {
       </div>
 
       {/* Header */}
-      <div
-        style={{ textAlign: "center", marginBottom: 52, position: "relative" }}
-      >
+      <div style={{ textAlign: "center", marginBottom: 48, position: "relative" }}>
         <div
           style={{
             display: "inline-block",
@@ -393,7 +424,10 @@ export default function App() {
             letterSpacing: "-0.03em",
           }}
         >
-          English →{" "}
+          {selectedLang && selectedLang.code !== "AUTO"
+            ? `${selectedLang.flag} ${selectedLang.label}`
+            : "Any Language"}{" "}
+          →{" "}
           <span
             style={{
               background: "linear-gradient(135deg, #f97316, #ea580c)",
@@ -409,12 +443,11 @@ export default function App() {
             color: "#9a9080",
             marginTop: 14,
             fontSize: 15,
-            letterSpacing: "0.01em",
             maxWidth: 420,
             margin: "14px auto 0",
           }}
         >
-          Upload your movie or TV series{" "}
+          Upload an{" "}
           <code
             style={{
               background: "rgba(255,255,255,0.07)",
@@ -425,24 +458,60 @@ export default function App() {
           >
             .srt
           </code>{" "}
-          subtitle file and get a natural, accurate Bengali translation with
-          DeepL.
+          subtitle file, choose the source language, and get an accurate Bengali translation with DeepL.
         </p>
+      </div>
+
+      {/* Language Selector */}
+      <div style={{ width: "100%", maxWidth: 560, marginBottom: 8 }}>
+        <div
+          style={{
+            fontSize: 11,
+            fontWeight: 700,
+            letterSpacing: "0.1em",
+            textTransform: "uppercase",
+            color: "#6a6050",
+            marginBottom: 8,
+          }}
+        >
+          Source Language
+        </div>
+        <select
+          value={sourceLang}
+          onChange={(e) => setSourceLang(e.target.value)}
+          style={selectStyle}
+          onFocus={(e) => (e.target.style.borderColor = "rgba(249,115,22,0.5)")}
+          onBlur={(e) => (e.target.style.borderColor = "rgba(255,255,255,0.1)")}
+        >
+          {SOURCE_LANGUAGES.map((lang) => (
+            <option
+              key={lang.code}
+              value={lang.code}
+              style={{ background: "#1a1a1d", color: "#f0ebe3" }}
+            >
+              {lang.flag}  {lang.label}{lang.code === "AUTO" ? " (DeepL detects automatically)" : ""}
+            </option>
+          ))}
+        </select>
+        <div style={{ fontSize: 11, color: "#4a4035", marginBottom: 20 }}>
+          {sourceLang === "AUTO"
+            ? "🌐 DeepL will automatically detect the subtitle language."
+            : `🎯 Translating from ${selectedLang?.label} → Bengali (বাংলা)`}
+        </div>
       </div>
 
       {/* Upload Zone */}
       <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragOver(true);
-        }}
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
         onDrop={handleDrop}
         onClick={() => fileRef.current.click()}
         style={{
           width: "100%",
           maxWidth: 560,
-          border: `2px dashed ${dragOver ? "#f97316" : file ? "rgba(249,115,22,0.4)" : "rgba(255,255,255,0.1)"}`,
+          border: `2px dashed ${
+            dragOver ? "#f97316" : file ? "rgba(249,115,22,0.4)" : "rgba(255,255,255,0.1)"
+          }`,
           borderRadius: 12,
           padding: "40px 32px",
           textAlign: "center",
@@ -450,11 +519,10 @@ export default function App() {
           background: dragOver
             ? "rgba(249,115,22,0.06)"
             : file
-              ? "rgba(249,115,22,0.03)"
-              : "rgba(255,255,255,0.02)",
+            ? "rgba(249,115,22,0.03)"
+            : "rgba(255,255,255,0.02)",
           transition: "all 0.2s ease",
           marginBottom: 24,
-          position: "relative",
         }}
       >
         <input
@@ -471,25 +539,19 @@ export default function App() {
               {file.name}
             </div>
             <div style={{ color: "#7a7060", fontSize: 13, marginTop: 6 }}>
-              {total} subtitle{total !== 1 ? "s" : ""} detected · Click to
-              change
+              {total} subtitle{total !== 1 ? "s" : ""} detected · Click to change
             </div>
           </>
         ) : (
           <>
-            <div style={{ fontSize: 40, marginBottom: 12, opacity: 0.5 }}>
-              ⬆️
-            </div>
-            <div style={{ fontWeight: 700, fontSize: 16 }}>
-              Drop your .srt file here
-            </div>
-            <div style={{ color: "#7a7060", fontSize: 13, marginTop: 6 }}>
-              or click to browse
-            </div>
+            <div style={{ fontSize: 40, marginBottom: 12, opacity: 0.5 }}>⬆️</div>
+            <div style={{ fontWeight: 700, fontSize: 16 }}>Drop your .srt file here</div>
+            <div style={{ color: "#7a7060", fontSize: 13, marginTop: 6 }}>or click to browse</div>
           </>
         )}
       </div>
 
+      {/* Error */}
       {error && (
         <div
           style={{
@@ -552,10 +614,10 @@ export default function App() {
               color: "#9a9080",
             }}
           >
-            <span>Translating subtitles…</span>
             <span>
-              {progress} / {total} ({pct}%)
+              {selectedLang?.flag} Translating {selectedLang?.code === "AUTO" ? "(auto-detected)" : selectedLang?.label} → Bengali…
             </span>
+            <span>{progress} / {total} ({pct}%)</span>
           </div>
           <div
             style={{
@@ -576,16 +638,8 @@ export default function App() {
               }}
             />
           </div>
-          <div
-            style={{
-              color: "#6a6050",
-              fontSize: 12,
-              marginTop: 8,
-              textAlign: "center",
-            }}
-          >
-            Processing in batches of {BATCH_SIZE} · Est. time: {estimatedTime}s
-            · Rate limited to prevent API throttling
+          <div style={{ color: "#6a6050", fontSize: 12, marginTop: 8, textAlign: "center" }}>
+            Processing in batches of {BATCH_SIZE} · Est. time: {estimatedTime}s · Rate limited to prevent API throttling
           </div>
         </div>
       )}
@@ -684,22 +738,12 @@ export default function App() {
                 key={i}
                 style={{
                   padding: "14px 20px",
-                  borderBottom:
-                    i < 4 ? "1px solid rgba(255,255,255,0.05)" : "none",
+                  borderBottom: i < 4 ? "1px solid rgba(255,255,255,0.05)" : "none",
                   background:
-                    i % 2 === 0
-                      ? "rgba(255,255,255,0.02)"
-                      : "rgba(255,255,255,0.01)",
+                    i % 2 === 0 ? "rgba(255,255,255,0.02)" : "rgba(255,255,255,0.01)",
                 }}
               >
-                <div
-                  style={{
-                    color: "#5a5040",
-                    fontSize: 11,
-                    marginBottom: 4,
-                    fontFamily: "monospace",
-                  }}
-                >
+                <div style={{ color: "#5a5040", fontSize: 11, marginBottom: 4, fontFamily: "monospace" }}>
                   #{e.index} · {e.timestamp}
                 </div>
                 <div
@@ -727,8 +771,7 @@ export default function App() {
           textAlign: "center",
         }}
       >
-        Powered by DeepL · High-Quality AI Translation · Supports standard .srt
-        format
+        Powered by DeepL · {SOURCE_LANGUAGES.length - 1} source languages supported · Always translates to বাংলা
       </p>
     </div>
   );
